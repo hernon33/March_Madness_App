@@ -169,7 +169,6 @@ def load_box_cached(season: int = 2026) -> pd.DataFrame:
     if os.path.exists(cache_file):
         return pd.read_pickle(cache_file)
 
-    # Iterate week by week through the college basketball season
     from datetime import date, timedelta
     all_games = []
     start = date(season - 1, 11, 1)   # Nov 1 of prior year
@@ -177,12 +176,11 @@ def load_box_cached(season: int = 2026) -> pd.DataFrame:
     current = start
 
     progress = st.progress(0, text="Fetching games from ESPN…")
-    total_weeks = int((end - start).days / 7) + 1
-    week_num = 0
+    total_days = (end - start).days + 1
+    day_num = 0
 
     while current <= end:
-        week_end = min(current + timedelta(days=6), end)
-        date_str = f"{current.strftime('%Y%m%d')}-{week_end.strftime('%Y%m%d')}"
+        date_str = current.strftime("%Y%m%d")
         url = (
             "https://site.api.espn.com/apis/site/v2/sports/basketball"
             f"/mens-college-basketball/scoreboard"
@@ -196,10 +194,10 @@ def load_box_cached(season: int = 2026) -> pd.DataFrame:
         except Exception:
             pass
 
-        week_num += 1
-        progress.progress(min(week_num / total_weeks, 1.0),
+        day_num += 1
+        progress.progress(min(day_num / total_days, 1.0),
                           text=f"Fetching games… {date_str}")
-        current += timedelta(days=7)
+        current += timedelta(days=1)
 
     progress.empty()
 
