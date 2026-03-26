@@ -230,11 +230,16 @@ def build_advanced_metrics(box: pd.DataFrame) -> pd.DataFrame:
         .isin(["true", "1", "yes", "t"])
         .astype(int)
     )
-
-    logo_col = "team_logo" if "team_logo" in b.columns else "team_display_name"
-
+if "team_logo" in b.columns:
+        logo_map = (
+            b[b["team_logo"].notna() & (b["team_logo"] != "")]
+            .groupby("team_display_name")["team_logo"]
+            .first()
+        )
+    else:
+        logo_map = pd.Series(dtype=str)
     grp = (
-        b.groupby(["team_display_name", logo_col])
+        b.groupby("team_display_name")
         .agg(
             games        = ("team_score",                        "count"),
             wins         = ("team_winner",                       "sum"),
@@ -256,9 +261,9 @@ def build_advanced_metrics(box: pd.DataFrame) -> pd.DataFrame:
             fast_break   = ("fast_break_points",                 "mean"),
         )
         .reset_index()
-        .rename(columns={"team_display_name": "team", logo_col: "logo"})
+        .rename(columns={"team_display_name": "team"})
     )
-
+    grp["logo"] = grp["team"].map(logo_map).fillna("")
     grp["losses"]         = grp["games"] - grp["wins"]
     grp["win_pct"]        = grp["wins"] / grp["games"].clip(lower=1)
     grp["scoring_margin"] = grp["pts"] - grp["pts_allowed"]
