@@ -163,7 +163,7 @@ def load_box_cached(season: int = 2026) -> pd.DataFrame:
     from datetime import date, timedelta
     all_games = []
     start = date(season - 1, 11, 1)
-    end   = date(season,     3, 31)
+    end   = date(season,     4, 8)
     current = start
 
     progress = st.progress(0, text="Fetching games from ESPN…")
