@@ -236,7 +236,7 @@ if "team_logo" in b.columns:
             .groupby("team_display_name")["team_logo"]
             .first()
         )
-    else:
+else:
         logo_map = pd.Series(dtype=str)
     grp = (
         b.groupby("team_display_name")
