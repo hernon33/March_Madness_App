@@ -14,12 +14,18 @@ import streamlit as st
 
 warnings.filterwarnings("ignore")
 
+# ─────────────────────────────────────────────────────────────
+# Page config
+# ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="March Madness — Head-to-Head Predictor",
     page_icon="🏀",
     layout="wide",
 )
 
+# ─────────────────────────────────────────────────────────────
+# CSS
+# ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
   .topbar {
@@ -34,7 +40,9 @@ st.markdown("""
     border-radius: 8px; display: flex;
     margin-bottom: 16px; overflow: hidden;
   }
-  .tcol { flex: 1; padding: 20px 24px; text-align: center; }
+  .tcol {
+    flex: 1; padding: 20px 24px; text-align: center;
+  }
   .midcol {
     width: 120px; display: flex; flex-direction: column;
     align-items: center; justify-content: center;
@@ -108,7 +116,7 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────────────────────
-# 1. Data loading
+# 1. Data loading — ESPN API directly (no hoopR)
 # ─────────────────────────────────────────────────────────────
 def _parse_events(events: list) -> list:
     rows = []
@@ -118,6 +126,7 @@ def _parse_events(events: list) -> list:
             teams = comp.get("competitors", [])
             if len(teams) < 2:
                 continue
+            # Only include completed games
             status = comp.get("status", {}).get("type", {}).get("completed", False)
             if not status:
                 continue
@@ -162,8 +171,8 @@ def load_box_cached(season: int = 2026) -> pd.DataFrame:
 
     from datetime import date, timedelta
     all_games = []
-    start = date(season - 1, 11, 1)
-    end   = date(season,     4, 8)
+    start = date(season - 1, 11, 1)   # Nov 1 of prior year
+    end   = date(season,     4, 8)    # Apr 8 covers full NCAA tournament
     current = start
 
     progress = st.progress(0, text="Fetching games from ESPN…")
@@ -230,14 +239,18 @@ def build_advanced_metrics(box: pd.DataFrame) -> pd.DataFrame:
         .isin(["true", "1", "yes", "t"])
         .astype(int)
     )
-if "team_logo" in b.columns:
+
+    # Get the first non-empty logo per team separately so logo differences
+    # across games don't split a team's records into multiple rows
+    if "team_logo" in b.columns:
         logo_map = (
             b[b["team_logo"].notna() & (b["team_logo"] != "")]
             .groupby("team_display_name")["team_logo"]
             .first()
         )
-else:
+    else:
         logo_map = pd.Series(dtype=str)
+
     grp = (
         b.groupby("team_display_name")
         .agg(
@@ -264,6 +277,7 @@ else:
         .rename(columns={"team_display_name": "team"})
     )
     grp["logo"] = grp["team"].map(logo_map).fillna("")
+
     grp["losses"]         = grp["games"] - grp["wins"]
     grp["win_pct"]        = grp["wins"] / grp["games"].clip(lower=1)
     grp["scoring_margin"] = grp["pts"] - grp["pts_allowed"]
@@ -274,7 +288,6 @@ else:
     grp["fg3_rate"]       = grp["fg3a"] / grp["fga"].clip(lower=1)
     grp["ft_pct"]         = grp["ftm"]  / grp["fta"].clip(lower=1)
 
-    # Keep all teams with at least 1 game so no team is missing from the dropdown
     return grp[grp["games"] >= 1].reset_index(drop=True)
 
 
@@ -354,24 +367,32 @@ def compute_adv_prob(sa: pd.DataFrame, sb: pd.DataFrame,
     if np.isnan(a_form): a_form = 0.0
     if np.isnan(b_form): b_form = 0.0
 
-    # Evidence-based weights (KenPom, BartTorvik, empirical Four Factors research)
-    # Scoring margin = #1 proven predictor | 3P% dropped (14.5% repeatability = noise)
-    nMGN     = _norm(g(sa, "scoring_margin"),          g(sb, "scoring_margin"))           # 30%
-    nEFG     = _norm(g(sa, "eff_fg_pct"),              g(sb, "eff_fg_pct"))               # 20%
-    nTOV     = _norm(g(sa, "tov_rate"),                g(sb, "tov_rate"),    inv=True)    # 15%
-    nDEF_EFF = _norm(g(sa, "pts_allowed"),             g(sb, "pts_allowed"), inv=True)    # 10%
-    nSOS     = _norm(g(sa, "sos"),                     g(sb, "sos"))                      # 8%
-    nOREB    = _norm(g(sa, "oreb"),                    g(sb, "oreb"))                     # 6%
-    nFTPCT   = _norm(g(sa, "ft_pct"),                  g(sb, "ft_pct"))                   # 5%
-    nDEF_ACT = _norm(g(sa, "blk") + g(sa, "stl"),     g(sb, "blk") + g(sb, "stl"))      # 4%
-    nFRM     = _norm(a_form,                            b_form)                            # 2%
+    # ── Evidence-based weights ────────────────────────────────────────────────
+    # Sources: KenPom, BartTorvik, empirical Four Factors re-analyses,
+    # Harvard Sports Analysis, ThePowerRank research
+    #
+    # Scoring margin (net efficiency) is the #1 proven predictor of future wins.
+    # Empirical Four Factors weights: eFG% ~44%, TOV% ~37%, OREB% ~12%, FTR ~7%
+    # 3P% has only 14.5% year-to-year repeatability — dropped as noisy.
+    # Defensive efficiency tracked separately to reward balanced teams.
+    # Recent form (hot streaks) has near-zero predictive value per research.
 
-    sca = (0.30*nMGN[0]     + 0.20*nEFG[0]     + 0.15*nTOV[0] +
-           0.10*nDEF_EFF[0] + 0.08*nSOS[0]     + 0.06*nOREB[0] +
-           0.05*nFTPCT[0]   + 0.04*nDEF_ACT[0] + 0.02*nFRM[0])
-    scb = (0.30*nMGN[1]     + 0.20*nEFG[1]     + 0.15*nTOV[1] +
-           0.10*nDEF_EFF[1] + 0.08*nSOS[1]     + 0.06*nOREB[1] +
-           0.05*nFTPCT[1]   + 0.04*nDEF_ACT[1] + 0.02*nFRM[1])
+    nMGN     = _norm(g(sa, "scoring_margin"),         g(sb, "scoring_margin"))         # 30%
+    nEFG     = _norm(g(sa, "eff_fg_pct"),             g(sb, "eff_fg_pct"))             # 20%
+    nTOV     = _norm(g(sa, "tov_rate"),               g(sb, "tov_rate"),  inv=True)    # 15%
+    nDEF_EFF = _norm(g(sa, "pts_allowed"),            g(sb, "pts_allowed"), inv=True)  # 10%
+    nSOS     = _norm(g(sa, "sos"),                    g(sb, "sos"))                    # 8%
+    nOREB    = _norm(g(sa, "oreb"),                   g(sb, "oreb"))                   # 6%
+    nFTPCT   = _norm(g(sa, "ft_pct"),                 g(sb, "ft_pct"))                 # 5%
+    nDEF_ACT = _norm(g(sa, "blk") + g(sa, "stl"),    g(sb, "blk") + g(sb, "stl"))    # 4%
+    nFRM     = _norm(a_form,                           b_form)                          # 2%
+
+    sca = (0.30*nMGN[0]  + 0.20*nEFG[0]  + 0.15*nTOV[0] +
+           0.10*nDEF_EFF[0] + 0.08*nSOS[0] + 0.06*nOREB[0] +
+           0.05*nFTPCT[0] + 0.04*nDEF_ACT[0] + 0.02*nFRM[0])
+    scb = (0.30*nMGN[1]  + 0.20*nEFG[1]  + 0.15*nTOV[1] +
+           0.10*nDEF_EFF[1] + 0.08*nSOS[1] + 0.06*nOREB[1] +
+           0.05*nFTPCT[1] + 0.04*nDEF_ACT[1] + 0.02*nFRM[1])
 
     tot = sca + scb
     pa  = sca / tot if (tot and not np.isnan(tot)) else 0.5
@@ -380,9 +401,9 @@ def compute_adv_prob(sa: pd.DataFrame, sb: pd.DataFrame,
 
     return dict(
         prob_a=pa, prob_b=1-pa,
-        nMGN=pct(nMGN),         nEFG=pct(nEFG),         nTOV=pct(nTOV),
-        nDEF_EFF=pct(nDEF_EFF), nSOS=pct(nSOS),         nOREB=pct(nOREB),
-        nFTPCT=pct(nFTPCT),     nDEF_ACT=pct(nDEF_ACT), nFRM=pct(nFRM),
+        nMGN=pct(nMGN), nEFG=pct(nEFG), nTOV=pct(nTOV),
+        nDEF_EFF=pct(nDEF_EFF), nSOS=pct(nSOS), nOREB=pct(nOREB),
+        nFTPCT=pct(nFTPCT), nDEF_ACT=pct(nDEF_ACT), nFRM=pct(nFRM),
     )
 
 
@@ -470,6 +491,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# Load & prepare data
 box_raw = load_box_cached(2026)
 if box_raw.empty:
     st.stop()
@@ -482,6 +504,7 @@ team_list = sorted(metrics_df["team"].tolist())
 default_a = "Duke Blue Devils"  if "Duke Blue Devils"  in team_list else team_list[0]
 default_b = "Kentucky Wildcats" if "Kentucky Wildcats" in team_list else team_list[1]
 
+# Team selectors
 c1, c2 = st.columns(2)
 with c1:
     team_a = st.selectbox("Team A", team_list, index=team_list.index(default_a))
@@ -521,6 +544,7 @@ mgn_b_sign  = "+" if mgn_b > 0 else ""
 mgn_a_cls   = "tmarg-pos" if mgn_a >= 0 else "tmarg-neg"
 mgn_b_cls   = "tmarg-pos" if mgn_b >= 0 else "tmarg-neg"
 
+# ── Matchup header ──────────────────────────────────────────
 st.markdown(f"""
 <div class="mcard">
   <div class="tcol">
@@ -542,6 +566,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+# ── Win probability table ───────────────────────────────────
 st.markdown(f"""
 <table class="otable">
   <thead>
@@ -552,20 +577,21 @@ st.markdown(f"""
     </tr>
   </thead>
   <tbody>
-    {odds_row(pa,                   pb,                   "Overall Prediction",    "Evidence-based composite model",              "—")}
-    {odds_row(pred["nMGN"][0],      pred["nMGN"][1],      "Scoring Margin",        "#1 predictor of future wins (KenPom/BPI)",    "30%")}
-    {odds_row(pred["nEFG"][0],      pred["nEFG"][1],      "Effective FG%",         "(FGM + 0.5×3PM) / FGA — top Four Factor",    "20%")}
-    {odds_row(pred["nTOV"][0],      pred["nTOV"][1],      "Turnover Rate",         "TOV / possessions (lower = better)",          "15%")}
-    {odds_row(pred["nDEF_EFF"][0],  pred["nDEF_EFF"][1],  "Defensive Efficiency",  "Points allowed/game — rewards balanced teams","10%")}
-    {odds_row(pred["nSOS"][0],      pred["nSOS"][1],      "Strength of Schedule",  "Validates whether efficiency nums are real",  "8%")}
-    {odds_row(pred["nOREB"][0],     pred["nOREB"][1],      "Off. Rebounding",       "Extra possessions via offensive boards",      "6%")}
-    {odds_row(pred["nFTPCT"][0],    pred["nFTPCT"][1],    "Free Throw %",          "Most stable shooting metric (70% repeatable)","5%")}
-    {odds_row(pred["nDEF_ACT"][0],  pred["nDEF_ACT"][1],  "Defensive Activity",    "Blocks + steals — shot quality defense",      "4%")}
-    {odds_row(pred["nFRM"][0],      pred["nFRM"][1],      "Recent Form",           "Win rate last 10 games (weak signal)",        "2%")}
+    {odds_row(pa,                    pb,                    "Overall Prediction",      "Evidence-based composite model",             "—")}
+    {odds_row(pred["nMGN"][0],      pred["nMGN"][1],      "Scoring Margin",          "#1 predictor of future wins (KenPom/BPI)",   "30%")}
+    {odds_row(pred["nEFG"][0],      pred["nEFG"][1],      "Effective FG%",           "(FGM + 0.5×3PM) / FGA — top Four Factor",    "20%")}
+    {odds_row(pred["nTOV"][0],      pred["nTOV"][1],      "Turnover Rate",           "TOV / possessions (lower = better)",         "15%")}
+    {odds_row(pred["nDEF_EFF"][0],  pred["nDEF_EFF"][1],  "Defensive Efficiency",    "Points allowed/game — rewards balanced teams","10%")}
+    {odds_row(pred["nSOS"][0],      pred["nSOS"][1],      "Strength of Schedule",    "Validates whether efficiency nums are real",  "8%")}
+    {odds_row(pred["nOREB"][0],     pred["nOREB"][1],      "Off. Rebounding",         "Extra possessions via offensive boards",      "6%")}
+    {odds_row(pred["nFTPCT"][0],    pred["nFTPCT"][1],    "Free Throw %",            "Most stable shooting metric (70% repeatable)","5%")}
+    {odds_row(pred["nDEF_ACT"][0],  pred["nDEF_ACT"][1],  "Defensive Activity",      "Blocks + steals — shot quality defense",      "4%")}
+    {odds_row(pred["nFRM"][0],      pred["nFRM"][1],      "Recent Form",             "Win rate last 10 games (weak signal)",        "2%")}
   </tbody>
 </table>
 """, unsafe_allow_html=True)
 
+# ── Stats comparison grid ───────────────────────────────────
 sos_a = round(safe_float(sa, "sos"), 3)
 sos_b = round(safe_float(sb, "sos"), 3)
 
@@ -580,7 +606,7 @@ st.markdown(f"""
   <div class="sec-title">SCORING</div>
   {stat_row(f"{wins_a}–{losses_a}",  f"{wins_b}–{losses_b}",  "Record")}
   {stat_row(sv(sa,"pts"),            sv(sb,"pts"),             "Points / Game")}
-  {stat_row(sv(sa,"pts_allowed"),    sv(sb,"pts_allowed"),     "Points Allowed",     inv=True)}
+  {stat_row(sv(sa,"pts_allowed"),    sv(sb,"pts_allowed"),     "Points Allowed",        inv=True)}
   {stat_row(f"{mgn_a_sign}{mgn_a}", f"{mgn_b_sign}{mgn_b}",   "Scoring Margin")}
   {stat_row(sv(sa,"paint_pts"),      sv(sb,"paint_pts"),       "Points in Paint")}
   {stat_row(sv(sa,"fast_break"),     sv(sb,"fast_break"),      "Fast Break Pts")}
